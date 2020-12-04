@@ -1,8 +1,8 @@
-#ifndef PROJECT1_KMEANS_H
-#define PROJECT1_KMEANS_H
-
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <getopt.h>
+#include "csvhelper.h"
 
 #define NUM_CLUSTERS 15
 #define MAX_ITERATIONS 10000
@@ -14,9 +14,11 @@ struct point {
 };
 
 struct kmeans_config {
-    char* in_file;
-    char* out_file;
+    char *in_file;
+    char *out_file;
     char *test_file;
+    char *metrics_file;
+    char *label;
     int max_points;
     int num_clusters;
     int max_iterations;
@@ -27,6 +29,8 @@ struct kmeans_config new_config()
     struct kmeans_config new_config;
     new_config.out_file = NULL;
     new_config.test_file = NULL;
+    new_config.metrics_file = NULL;
+    new_config.label = "no-label";
     new_config.max_points = MAX_POINTS;
     new_config.num_clusters = NUM_CLUSTERS;
     new_config.max_iterations = MAX_ITERATIONS;
@@ -39,8 +43,11 @@ struct kmeans_metrics {
     double centroids_seconds;
     double total_seconds;
     double max_iteration_seconds;
-    int iterations;
-    int test;
+    int used_iterations;
+    int test_result;
+    int num_points;
+    int num_clusters;
+    int max_iterations;
 };
 
 struct kmeans_metrics new_metrics()
@@ -51,14 +58,17 @@ struct kmeans_metrics new_metrics()
     new_metrics.assignment_seconds = 0;
     new_metrics.total_seconds = 0;
     new_metrics.max_iteration_seconds = 0;
-    new_metrics.iterations = 0;
-    new_metrics.test = 0;
+    new_metrics.used_iterations = 0;
+    new_metrics.test_result = 0; // zero = no test performed
+    new_metrics.num_points = 0;
+    new_metrics.num_clusters = 0;
+    new_metrics.max_iterations = 0;
     return new_metrics;
 }
 
 void usage()
 {
-    fprintf(stderr, "Usage: kmeans -f data.csv [-o OUTPUT.CSV] [-i MAX_ITERATIONS] [-n MAX_POINTS] [-k NUM_CLUSTERS]\n");
+    fprintf(stderr, "Usage: kmeans -f data.csv [-o OUTPUT.CSV] [-i MAX_ITERATIONS] [-n MAX_POINTS] [-k NUM_CLUSTERS] [-t TESTFILE.CSV]\n");
     exit(1);
 }
 
@@ -87,23 +97,32 @@ void print_headers(FILE *out, char **headers, int dimensions) {
 
 void print_metrics_headers(FILE *out)
 {
-    fprintf(out, "label,iterations,total,assignments,centroids,max_iteration,test_results");
+    fprintf(out, "label,used_iterations,total_seconds,assignments_seconds,"
+                 "centroids_seconds,max_iteration_seconds,num_points,"
+                 "num_clusters,max_iterations,test_results\n");
 }
 
-void print_metrics(FILE *out, struct kmeans_metrics metrics)
+/**
+ * Print the results of the run with timing numbers in a single row to go in a csv file
+ * @param out output file pointer
+ * @param metrics metrics object
+ */
+void print_metrics(FILE *out, struct kmeans_metrics *metrics)
 {
-    char *results = "untested";
-    switch (metrics.test) {
+    char *test_results = "untested";
+    switch (metrics->test_result) {
         case 1:
-            results = "passed";
+            test_results = "passed";
             break;
         case -1:
-            results = "FAILED!";
+            test_results = "FAILED!";
             break;
     }
-    fprintf(out, "%20s %d %.3f %.3f %.3fs %.3f %s\n",
-            metrics.label, metrics.iterations, metrics.total_seconds,
-            metrics.assignment_seconds, metrics.centroids_seconds, metrics.max_iteration_seconds, results);
+    fprintf(out, "%s,%d,%f,%f,%f,%f,%d,%d,%d,%s\n",
+            metrics->label, metrics->used_iterations, metrics->total_seconds,
+            metrics->assignment_seconds, metrics->centroids_seconds, metrics->max_iteration_seconds,
+            metrics->num_points, metrics->num_clusters, metrics->max_iterations,
+            test_results);
 }
 
 int read_csv(FILE* csv_file, struct point *dataset, int max_points, char *headers[], int *dimensions)
@@ -134,7 +153,10 @@ int read_csv(FILE* csv_file, struct point *dataset, int max_points, char *header
             if (num_fields > 2 && *dimensions > 2) {
                 char *cluster_string = csvfield(2);
                 // deliberately atoi it producing zero if it does not match a proper cluster
-                new_point.cluster = atoi(cluster_string);
+                int cluster;
+                char prefix[200];
+                int result = sscanf(cluster_string,"%[^0-9]%d", prefix, &cluster);
+                new_point.cluster = cluster;
             }
             dataset[count] = new_point;
             count++;
@@ -173,6 +195,23 @@ void write_csv_file(char *csv_file_name, struct point *dataset, int num_points, 
     write_csv(csv_file, dataset, num_points, headers, dimensions);
 }
 
+void write_metrics_file(char *metrics_file_name, struct kmeans_metrics *metrics) {
+    char *mode = "a"; // default to append to the metrics file
+    bool first_time = false;
+    if (access(metrics_file_name, F_OK ) == -1 ) {
+        // first time - lets change the mode to "w" and append
+        fprintf(stdout, "Creating metrics file and adding headers: %s", metrics_file_name);
+        first_time = true;
+        mode = "w";
+    }
+    FILE *metrics_file = fopen(metrics_file_name, mode);
+    if (first_time) {
+        print_metrics_headers(metrics_file);
+    }
+
+    print_metrics(metrics_file, metrics);
+}
+
 char* valid_file(char opt, char *filename)
 {
     if (access(filename, F_OK ) == -1 ) {
@@ -202,9 +241,71 @@ void validate_config(struct kmeans_config config)
     printf("Input file    : %-10s\n", config.in_file);
     printf("Output file   : %-10s\n", config.out_file);
     printf("Test file     : %-10s\n", config.test_file);
+    printf("Metrics file  : %-10s\n", config.metrics_file);
     printf("Num clusters  : %-10d\n", config.num_clusters);
     printf("Max points    : %-10d\n", config.max_points);
     printf("Max iterations: %-10d\n", config.max_iterations);
+}
+
+/**
+ * Compares the dataset against test file.
+ *
+ * If every point in the dataset has a matching point at the same position in the
+ * test dataset from the test file, and the clusters match, then 1 is returned,
+ * otherwise -1 is returned indicating a failure.
+ *
+ * Note that the test file may have more points than the dataset - trailing points are ignored
+ * in this case - but if it has fewer points, this is considered a test failure.
+ *
+ * The method returns -1 after the first failure.
+ *
+ * @param config
+ * @param dataset
+ * @param num_points
+ * @return 1 or -1 if the files match
+ */
+int test_results(char* test_file_name, struct point *dataset, int num_points)
+{
+    int result = 1;
+    struct point *testset = malloc(MAX_POINTS * sizeof(struct point));
+    int test_dimensions;
+    static char* test_headers[3];
+    int num_test_points = read_csv_file(test_file_name, testset, num_points, test_headers, &test_dimensions);
+    if (num_test_points < num_points) {
+        fprintf(stderr, "Test failed. The test dataset has only %d records, but needs at least %d",
+                num_test_points, num_points);
+        result = 1;
+    }
+    else {
+        for (int n = 0; n < num_points; ++n) {
+            struct point *p = &dataset[n];
+            struct point *test_p = &testset[n];
+            if (test_p->x == p->x && test_p->y == p->y) {
+                if (test_p->cluster != p->cluster) {
+                    // points match but assigned to different clusters
+                    fprintf(stderr, "Test failure at %d: (%.2f,%.2f) result cluster: %d does not match test: %d\n",
+                            n+1, p->x, p->y, p->cluster, test_p->cluster);
+                    result = -1;
+                    break; // give up comparing
+                }
+#ifdef DEBUG
+                else {
+                    fprintf(stdout, "Test success at %d: (%.2f,%.2f) clusters match: %d\n",
+                            n+1, p->x, p->y, p->cluster);
+
+                }
+#endif
+            }
+            else {
+                // points themselves are different
+                fprintf(stderr, "Test failure at %d: %.2f,%.2f does not match test point: %.2f,%.2f\n",
+                        n+1, p->x, p->y, test_p->x, test_p->y);
+                result = -1;
+                break; // give up comparing
+            }
+        }
+    }
+    return result;
 }
 
 struct kmeans_config parse_cli(int argc, char *argv[])
@@ -220,7 +321,7 @@ struct kmeans_config parse_cli(int argc, char *argv[])
         usage();
     }
 
-    while((opt = getopt(argc, argv, "f:i:o:k:n:")) != -1)
+    while((opt = getopt(argc, argv, "f:i:o:k:n:l:t:m:")) != -1)
     {
         switch(opt) {
             case 'f':
@@ -232,6 +333,12 @@ struct kmeans_config parse_cli(int argc, char *argv[])
             case 't':
                 config.test_file = optarg;
                 break;
+            case 'm':
+                config.metrics_file = optarg;
+                break;
+            case 'l':
+                config.label = optarg;
+                break;
             case 'i':
                 config.max_iterations = valid_count(optopt, optarg);
                 break;
@@ -242,11 +349,12 @@ struct kmeans_config parse_cli(int argc, char *argv[])
                 config.num_clusters = valid_count(optopt, optarg);
                 break;
             case ':':
-                printf("Option %c needs a value\n", optopt);
+                fprintf(stderr, "ERROR: Option %c needs a value\n", optopt);
+                usage();
                 break;
             case '?':
-                printf("unknown option: %c\n", optopt);
-                break;
+                fprintf(stderr, "ERROR: Unknown option: %c\n", optopt);
+                usage();
             default:
                 printf("Default opts");
         }
@@ -256,4 +364,3 @@ struct kmeans_config parse_cli(int argc, char *argv[])
 
     return config;
 }
-#endif //PROJECT1_KMEANS_H
