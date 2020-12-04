@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.17)
+project(project1 C)
+set(CMAKE_C_COMPILER "/usr/local/bin/gcc-10")
+set(CMAKE_C_STANDARD 99)
+
+#find_package(OpenMP REQUIRED)
+message(STATUS "OMP FLAGS: ${OpenMP_C_FLAGS}")
+message(STATUS "CMAKE FLAGS: ${CMAKE_C_FLAGS}")
+#target_compile_options(project1 PRIVATE -Wall ${OpenMP_C_FLAGS})
+#target_link_libraries(project1 PRIVATE ${OpenMP_C_FLAGS})
+
+#find_package(OpenMP)
+#if (OPENMP_FOUND)
+#    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+#    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+#    set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+#endif()
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fopenmp")
+#set_target_properties(kmeans LINK_FLAGS "${OpenMP_CXX_FLAGS}")
+
+add_definitions(-DDEBUG)
+add_executable(kmeans kmeans.c csvhelper.c csvhelper.h kmeans.h)
+#target_link_libraries(kmeans PRIVATE OpenMP::OpenMP_CXX)
