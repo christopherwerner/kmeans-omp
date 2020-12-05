@@ -1,7 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <float.h>
-#include <math.h>
 #include <omp.h>
 #include "kmeans.h"
 
@@ -34,78 +32,19 @@ void initialize_centroids(struct point* dataset, struct point *centroids, int nu
 }
 
 /**
- * Calculate the euclidean distance between two points.
+ * Assigns each point in the dataset to a cluster based on the distance from that cluster.
  *
- * That is, the square root of the sum of the squares of the distances between coordinates
+ * The return value indicates how many points were assigned to a _different_ cluster
+ * in this assignment process: this indicates how close the algorithm is to completion.
+ * When the return value is zero, no points changed cluster so the clustering is complete.
  *
- * Note that most k-means algorithms work with the pure sum of squares - so the _square_ of
- * the distance, since we really only need the _relative_ distances to assign a point to
- * the right cluster - and square-root is a slow function.
- * But since this is an exercise in performance tuning, we'll do it the slow way with square roots
- * so we can better see how much performance improves when we add OMP
- *
- * The points are expected as pointers since the method does not change them and memory and time is
- * saved by not copying the structs unnecessarily.
- *
- * @param p1 pointer to first point in 2 dimensions
- * @param p2 ponter to second point in 2 dimensions
- * @return geometric distance between the 2 points
+ * @param dataset set of all points with current cluster assignments
+ * @param num_points number of points in the dataset
+ * @param centroids array that holds the current centroids
+ * @param num_clusters number of clusters - hence size of the centroids array
+ * @return the number of points for which the cluster assignment was changed
  */
-double euclidean_distance(struct point *p1, struct point *p2)
-{
-    double square_diff_x = (p2->x - p1->x) * (p2->x - p1->x);
-    double square_diff_y = (p2->y - p1->y) * (p2->y - p1->y);
-    double square_dist = square_diff_x + square_diff_y;
-    // most k-means algorithms would stop here and return the square of the euclidean distance
-    // because its faster, and we only need comparative values for clustering, but since this
-    // is an exercise in performance tuning, we'll do it the slow way with square roots
-    double dist = sqrt(square_dist);
-#ifdef DEBUG
-
- //   printf("Distance from (%f, %f) -> (%f, %f) = %f\n", p1.x, p1.y, p2.x, p2.y, dist);
-//    printf("x^2 = %f, y^2 = %f, d^2 = %f\n", square_diff_x, square_diff_y, square_dist);
-#endif
-    return dist;
-}
-
-/**
- * Assigns each point in the dataset to a cluster based on the distance from that cluster
- * @param dataset
- * @param num_points
- * @param centroids
- * @param num_clusters
- * @return
- */
-int assign_clusters(struct point* dataset, int num_points, struct point *centroids, int num_clusters)
-{
-#ifdef DEBUG
-    printf("\nStarting assignment phase:\n");
-#endif
-    int cluster_changes = 0;
-    for (int n = 0; n < num_points; ++n) {
-        double min_distance = DBL_MAX; // init the min distance to a big number
-        int closest_cluster = -1;
-        for (int k = 0; k < num_clusters; ++k) {
-            // calc the distance passing pointers to points since the distance does not modify them
-            double distance_from_centroid = euclidean_distance(&dataset[n], &centroids[k]);
-            if (distance_from_centroid < min_distance) {
-                min_distance = distance_from_centroid;
-                closest_cluster = k;
-            }
-        }
-        // if the point was not already in the closest cluster, move it there and count changes
-        if (dataset[n].cluster != closest_cluster) {
-            dataset[n].cluster = closest_cluster;
-            cluster_changes++;
-#ifdef DEBUG
-            printf("Assigning (%.0f, %.0f) to cluster %d with centroid (%.2f, %.2f) d = %.2f\n",
-                   dataset[n].x, dataset[n].y, closest_cluster,
-                   centroids[closest_cluster].x, centroids[closest_cluster].y, min_distance);
-#endif
-        }
-    }
-    return cluster_changes;
-}
+extern int assign_clusters(struct point* dataset, int num_points, struct point *centroids, int num_clusters);
 
 /**
  * Calculates new centroids for the clusters of the given dataset by finding the
@@ -114,43 +53,12 @@ int assign_clusters(struct point* dataset, int num_points, struct point *centroi
  * The centroids are set in the array passed in, which is expected to be pre-allocated
  * and contain the previous centroids: these are overwritten by the new values.
  *
- * @param dataset set of all points with current cluster assigments
+ * @param dataset set of all points with current cluster assignments
  * @param num_points number of points in the dataset
  * @param centroids array to hold the centroids - already allocated
  * @param num_clusters number of clusters - hence size of the centroids array
  */
-void calculate_centroids(struct point* dataset, int num_points, struct point *centroids, int num_clusters)
-{
-    double sum_of_x_per_cluster[num_clusters];
-    double sum_of_y_per_cluster[num_clusters];
-    int num_points_in_cluster[num_clusters];
-    for (int k = 0; k < num_clusters; ++k) {
-        sum_of_x_per_cluster[k] = 0.0;
-        sum_of_y_per_cluster[k] = 0.0;
-        num_points_in_cluster[k] = 0;
-    }
-
-    // loop over all points in the database and sum up
-    // the x coords of clusters to which each belongs
-    for (int n = 0; n < num_points; ++n) {
-        // use pointer to struct to avoid creating unnecessary copy in memory
-        struct point *p = &dataset[n];
-        int k = p->cluster;
-        sum_of_x_per_cluster[k] += p->x;
-        sum_of_y_per_cluster[k] += p->y;
-        // count the points in the cluster to get a mean later
-        num_points_in_cluster[k]++;
-    }
-
-    // the new centroids are at the mean x and y coords of the clusters
-    for (int k = 0; k < num_clusters; ++k) {
-        struct point new_centroid;
-        // mean x, mean y => new centroid
-        new_centroid.x = sum_of_x_per_cluster[k] / num_points_in_cluster[k];
-        new_centroid.y = sum_of_y_per_cluster[k] / num_points_in_cluster[k];
-        centroids[k] = new_centroid;
-    }
-}
+extern void calculate_centroids(struct point* dataset, int num_points, struct point *centroids, int num_clusters);
 
 int main(int argc, char* argv [])
 {
