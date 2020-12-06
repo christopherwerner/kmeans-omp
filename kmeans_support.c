@@ -2,10 +2,15 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <getopt.h>
+#include <unistd.h>
 #include "csvhelper.h"
 #include "kmeans.h"
 #include <math.h>
+#include <omp.h>
 
+/**
+ * Initialize a new kmeans_config to hold the run configuration set from the command line
+ */
 struct kmeans_config new_config()
 {
     struct kmeans_config new_config;
@@ -16,9 +21,14 @@ struct kmeans_config new_config()
     new_config.max_points = MAX_POINTS;
     new_config.num_clusters = NUM_CLUSTERS;
     new_config.max_iterations = MAX_ITERATIONS;
+    new_config.silent = false;
+    new_config.quiet = false;
     return new_config;
 }
 
+/**
+ * Initialize a new kmeans_metrics to hold the run performance metrics and settings
+ */
 struct kmeans_metrics new_metrics()
 {
     struct kmeans_metrics new_metrics;
@@ -32,7 +42,65 @@ struct kmeans_metrics new_metrics()
     new_metrics.num_points = 0;
     new_metrics.num_clusters = 0;
     new_metrics.max_iterations = 0;
+    new_metrics.omp_max_threads = -1;
+    new_metrics.omp_schedule_kind = -1; // if we see -1 then the kind was not fetched
     return new_metrics;
+}
+
+/**
+ * Convert the omp schedule kind to an int for easy graphing and
+ * handle the OMP 4.5 introduction of monotonic for static by returning zero.
+ *
+ * @param chunk_size pointer to an int to hold the chunk size
+ * @return an integer representing the OpenMP schedule kind:
+ *      0 = monotonic (OMP 4.5+)
+ *      1 = static
+ *      2 = dynamic (default)
+ *      3 = guided
+ *      4 = auto
+ */
+int omp_schedule_kind(int *chunk_size)
+{
+    int chunk_s = -1; // create our own in case chunk_size is a null pointer
+    enum omp_sched_t kind = omp_sched_static;
+    omp_get_schedule(&kind, &chunk_s);
+
+//    printf("kind   : %d\n", kind);
+//    printf("omp_sched_static    : %d\n", omp_sched_static);
+//    printf("omp_sched_dynamic   : %d\n", omp_sched_dynamic);
+//    printf("omp_sched_guided    : %d\n", omp_sched_guided);
+//    printf("omp_sched_auto      : %d\n", omp_sched_auto);
+//    printf("omp_sched_monotonic : %d\n", omp_sched_monotonic);
+    // allow for chunk_size null if we don't care about it otherwise assign it
+    if (chunk_size != NULL) {
+        *chunk_size = chunk_s;
+    }
+
+    if (kind < -1) {
+        // on mac os the OMP_SCHEDULE variable value "static" results in -2147483647 (-MAX_INT)
+        // which is probably meant to match the omp_sched_monotonic enum but misses by 1
+        // But we switch it for 1 anyway to simulate static on the Linux SEARCH server which is
+        // where this program is finally run anyway (the Mac OS run is just for dev/debug)
+        // Note that monotonic was introduced in OpenMP 4.5
+        return 1;
+    }
+    return (int)kind;
+}
+
+/**
+ * Print debug information for the assignment of a point to a cluster
+ */
+void debug_assignment(struct point *p, int closest_cluster, struct point *centroid, double min_distance)
+{
+    printf("Assigning (%s) to cluster %d with centroid (%s) d = %f\n",
+            p_to_s(p), closest_cluster, p_to_s(centroid), min_distance);
+}
+
+void omp_debug(char *msg) {
+    int chunks = -1;
+    int kind = omp_schedule_kind(&chunks);
+    printf("%s: OMP schedule kind %d with chunk size %d on thread %d of %d\n",
+           msg, kind, chunks, omp_get_thread_num(), omp_get_num_threads());
 }
 
 /**
@@ -62,10 +130,8 @@ double euclidean_distance(struct point *p1, struct point *p2)
     // because its faster, and we only need comparative values for clustering, but since this
     // is an exercise in performance tuning, we'll do it the slow way with square roots
     double dist = sqrt(square_dist);
-#ifdef DEBUG
-
-    //   printf("Distance from (%f, %f) -> (%f, %f) = %f\n", p1.x, p1.y, p2.x, p2.y, dist);
-//    printf("x^2 = %f, y^2 = %f, d^2 = %f\n", square_diff_x, square_diff_y, square_dist);
+#ifdef TRACE
+    //   printf("Distance from (%s) -> (%s) = %f\n", p_to_s(p1), p_to_s(p2), dist);
 #endif
     return dist;
 }
@@ -76,18 +142,53 @@ void usage()
     exit(1);
 }
 
+/**
+ * Convert a point to a string with a standard precision
+ *
+ * @param p point to print to string
+ * @return allocated string holding point
+ */
+const char *p_to_s(struct point *p)
+{
+    // TODO this eats a lot of memory when in a big loop - consider passing in a string to reuse
+    // but for now we keep string printing out of timed sections so it won't have much affect
+    char *result = malloc(50 * sizeof(char)); // big enough for 2 points
+    sprintf(result, "%.7f,%.7f", p->x, p->y);
+    return result;
+}
+
+/**
+ * Print dataset of points to a file pointer (may be stdout) including cluster assignment
+ *
+ * @param out file pointer for output
+ * @param dataset array of points
+ * @param num_points size of the array
+ */
 void print_points(FILE *out, struct point *dataset, int num_points) {
     for (int i = 0; i < num_points; ++i) {
-        fprintf(out, "%.2f,%.2f,cluster_%d\n", dataset[i].x, dataset[i].y, dataset[i].cluster);
+        fprintf(out, "%s,cluster_%d\n", p_to_s(&dataset[i]), dataset[i].cluster);
     }
 }
 
+/**
+ * Print the set of centroids for the clusters to a file pointer (may be stdout)
+ *
+ * @param out file pointer for output
+ * @param centroids array of centroid points
+ * @param num_points number of centroids == number of clusters
+ */
 void print_centroids(FILE *out, struct point *centroids, int num_points) {
     for (int i = 0; i < num_points; ++i) {
-        fprintf(out, "centroid[%d] is at %.2f,%.2f\n", i, centroids[i].x, centroids[i].y);
+        fprintf(out, "centroid[%d] is at %s\n", i, p_to_s(&centroids[i]));
     }
 }
 
+/**
+ * Print headers for output CSV files
+ * @param out file pointer for output
+ * @param headers array of strings
+ * @param dimensions number of strings in the array
+ */
 void print_headers(FILE *out, char **headers, int dimensions) {
     if (headers == NULL) return;
 
@@ -99,11 +200,18 @@ void print_headers(FILE *out, char **headers, int dimensions) {
     fprintf(out, ",Cluster\n");
 }
 
+/**
+ * Print the headers for the metrics table to a file pointer.
+ * Used for the first run to use a metrics file to produce the header row
+ *
+ * @param out file pointer
+ */
 void print_metrics_headers(FILE *out)
 {
     fprintf(out, "label,used_iterations,total_seconds,assignments_seconds,"
                  "centroids_seconds,max_iteration_seconds,num_points,"
-                 "num_clusters,max_iterations,test_results\n");
+                 "num_clusters,max_iterations,max_threads,omp_schedule,omp_chunk_size,"
+                 "test_results\n");
 }
 
 /**
@@ -122,13 +230,25 @@ void print_metrics(FILE *out, struct kmeans_metrics *metrics)
             test_results = "FAILED!";
             break;
     }
-    fprintf(out, "%s,%d,%f,%f,%f,%f,%d,%d,%d,%s\n",
+    fprintf(out, "%s,%d,%f,%f,%f,%f,%d,%d,%d,%d,%d,%d,%s\n",
             metrics->label, metrics->used_iterations, metrics->total_seconds,
             metrics->assignment_seconds, metrics->centroids_seconds, metrics->max_iteration_seconds,
             metrics->num_points, metrics->num_clusters, metrics->max_iterations,
+            metrics->omp_max_threads, metrics->omp_schedule_kind, metrics->omp_chunk_size,
             test_results);
 }
 
+/**
+ * Read 2-dimensional points from the CSV file with headers.
+ *
+ * @param csv_file file pointer to the input file
+ * @param dataset pre-allocated array of points into which to read the file
+ * @param max_points max number of points to read
+ * @param headers if not null, pre-allocated string array to hold the headers
+ * @param dimensions number of headers
+ *
+ * @return number of actual points read from the file
+ */
 int read_csv(FILE* csv_file, struct point *dataset, int max_points, char *headers[], int *dimensions)
 {
     char *line;
@@ -156,10 +276,9 @@ int read_csv(FILE* csv_file, struct point *dataset, int max_points, char *header
 
             if (num_fields > 2 && *dimensions > 2) {
                 char *cluster_string = csvfield(2);
-                // deliberately atoi it producing zero if it does not match a proper cluster
                 int cluster;
                 char prefix[200];
-                int result = sscanf(cluster_string,"%[^0-9]%d", prefix, &cluster);
+                sscanf(cluster_string,"%[^0-9]%d", prefix, &cluster);
                 new_point.cluster = cluster;
             }
             dataset[count] = new_point;
@@ -263,14 +382,17 @@ void validate_config(struct kmeans_config config)
         fprintf(stderr, "You must at least provide an input file with -f\n");
         usage();
     }
-    printf("Config:");
-    printf("Input file    : %-10s\n", config.in_file);
-    printf("Output file   : %-10s\n", config.out_file);
-    printf("Test file     : %-10s\n", config.test_file);
-    printf("Metrics file  : %-10s\n", config.metrics_file);
-    printf("Num clusters  : %-10d\n", config.num_clusters);
-    printf("Max points    : %-10d\n", config.max_points);
-    printf("Max iterations: %-10d\n", config.max_iterations);
+
+    if (!config.quiet) {
+        printf("Config:\n");
+        printf("Input file    : %-10s\n", config.in_file);
+        printf("Output file   : %-10s\n", config.out_file);
+        printf("Test file     : %-10s\n", config.test_file);
+        printf("Metrics file  : %-10s\n", config.metrics_file);
+        printf("Num clusters  : %-10d\n", config.num_clusters);
+        printf("Max points    : %-10d\n", config.max_points);
+        printf("Max iterations: %-10d\n", config.max_iterations);
+    }
 }
 
 /**
@@ -290,16 +412,18 @@ void validate_config(struct kmeans_config config)
  * @param num_points
  * @return 1 or -1 if the files match
  */
-int test_results(char* test_file_name, struct point *dataset, int num_points)
+int test_results(struct kmeans_config *config, char* test_file_name, struct point *dataset, int num_points)
 {
     int result = 1;
-    struct point *testset = malloc(MAX_POINTS * sizeof(struct point));
+    struct point *testset = malloc((num_points + 10) * sizeof(struct point));
     int test_dimensions;
     static char* test_headers[3];
     int num_test_points = read_csv_file(test_file_name, testset, num_points, test_headers, &test_dimensions);
     if (num_test_points < num_points) {
+        if (!config->silent) {
         fprintf(stderr, "Test failed. The test dataset has only %d records, but needs at least %d",
                 num_test_points, num_points);
+        }
         result = 1;
     }
     else {
@@ -309,23 +433,28 @@ int test_results(char* test_file_name, struct point *dataset, int num_points)
             if (test_p->x == p->x && test_p->y == p->y) {
                 if (test_p->cluster != p->cluster) {
                     // points match but assigned to different clusters
-                    fprintf(stderr, "Test failure at %d: (%.2f,%.2f) result cluster: %d does not match test: %d\n",
-                            n+1, p->x, p->y, p->cluster, test_p->cluster);
+                    if (!config->silent) {
+                        fprintf(stderr, "Test failure at %d: (%s) result cluster: %d does not match test: %d\n",
+                                n + 1, p_to_s(p), p->cluster, test_p->cluster);
+                    }
                     result = -1;
                     break; // give up comparing
                 }
-#ifdef DEBUG
+#ifdef TRACE
                 else {
-                    fprintf(stdout, "Test success at %d: (%.2f,%.2f) clusters match: %d\n",
-                            n+1, p->x, p->y, p->cluster);
+                    fprintf(stdout, "Test success at %d: (%s) clusters match: %d\n",
+                            n+1, p_to_s(p), p->cluster);
 
                 }
 #endif
             }
             else {
                 // points themselves are different
-                fprintf(stderr, "Test failure at %d: %.2f,%.2f does not match test point: %.2f,%.2f\n",
-                        n+1, p->x, p->y, test_p->x, test_p->y);
+                if (!config->silent) {
+                fprintf(stderr, "Test failure at %d: %s does not match test point: %s\n",
+                        n+1, p_to_s(p), p_to_s(test_p));
+
+                }
                 result = -1;
                 break; // give up comparing
             }
@@ -347,9 +476,16 @@ struct kmeans_config parse_cli(int argc, char *argv[])
         usage();
     }
 
-    while((opt = getopt(argc, argv, "f:i:o:k:n:l:t:m:")) != -1)
+    while((opt = getopt(argc, argv, "f:i:o:k:n:l:t:m:sq")) != -1)
     {
         switch(opt) {
+            case 's':
+                config.silent = true;
+                config.quiet = true; // silent is quiet too - one day replace this with proper logging
+                break;
+            case 'q':
+                config.quiet = true;
+                break;
             case 'f':
                 config.in_file = valid_file(optopt, optarg);
                 break;
@@ -381,8 +517,9 @@ struct kmeans_config parse_cli(int argc, char *argv[])
             case '?':
                 fprintf(stderr, "ERROR: Unknown option: %c\n", optopt);
                 usage();
+                break;
             default:
-                printf("Default opts");
+                fprintf(stderr, "ERROR: Should never get here");
         }
     }
 

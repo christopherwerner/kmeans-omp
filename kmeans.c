@@ -91,6 +91,9 @@ int main(int argc, char* argv [])
     metrics.max_iterations = config.max_iterations;
     metrics.num_clusters = config.num_clusters;
     metrics.num_points = num_points;
+    metrics.omp_max_threads = omp_get_max_threads();
+    // get kind: dynamic, static, auto.. and the chunk size
+    metrics.omp_schedule_kind = omp_schedule_kind(&metrics.omp_chunk_size);
 
     while (cluster_changes > 0 && iterations < config.max_iterations) {
         // K-Means Algo Step 2: assign every point to a cluster (closest centroid)
@@ -113,45 +116,59 @@ int main(int argc, char* argv [])
         double centroids_seconds = omp_get_wtime() - start_centroids;
         metrics.centroids_seconds += centroids_seconds;
 
-#ifdef DEBUG
+#ifdef TRACE
         printf("New centroids calculated New assignments:\n");
         print_centroids(stdout, centroids, config.num_clusters);
-        printf("Time taken: %fseconds total in centroid calculation so far: %fseconds",
+        printf("Time taken: %.3f seconds total in centroid calculation so far: %.3f seconds",
                centroids_seconds, metrics.centroids_seconds);
 #endif
-//#ifdef CALC_MAX_ITERATION_TIME
+#ifndef SKIP_MAX_ITERATION_CALC
         // potentially costly calculation may skew stats, hence only in ifdef
         double iteration_seconds = omp_get_wtime() - start_iteration;
         if (iteration_seconds > metrics.max_iteration_seconds) {
             metrics.max_iteration_seconds = iteration_seconds;
         }
-//#endif
+#endif
         iterations++;
     }
     metrics.total_seconds = omp_get_wtime() - start_time;
     metrics.used_iterations = iterations;
 
-    printf("\nEnded after %d iterations with %d changed clusters\n", iterations, cluster_changes);
-    printf("Writing output to %s\n", config.out_file);
-    write_csv_file(config.out_file, dataset, num_points, headers, dimensions);
+    if (!config.quiet) {
+        printf("\nEnded after %d iterations with %d changed clusters\n", iterations, cluster_changes);
+    }
+
+    // output file is not always written: sometimes we only run for metrics and compare with test data
+    if (config.out_file) {
+        if (!config.silent) {
+            printf("Writing output to %s\n", config.out_file);
+        }
+        write_csv_file(config.out_file, dataset, num_points, headers, dimensions);
+    }
 #ifdef DEBUG
     write_csv(stdout, dataset, num_points, headers, dimensions);
 #endif
 
     if (config.test_file) {
         char* test_file_name = valid_file('t', config.test_file);
-        printf("Comparing results against test file: %s\n", config.test_file);
-        metrics.test_result = test_results(test_file_name, dataset, num_points);
+        if (!config.quiet) {
+            printf("Comparing results against test file: %s\n", config.test_file);
+        }
+        metrics.test_result = test_results(&config, test_file_name, dataset, num_points);
     }
 
     if (config.metrics_file) {
         // metrics file may or may not already exist
-        printf("Reporting metrics to: %s\n", config.metrics_file);
+        if (!config.quiet) {
+            printf("Reporting metrics to: %s\n", config.metrics_file);
+        }
         write_metrics_file(config.metrics_file, &metrics);
     }
 
-    print_metrics_headers(stdout);
-    print_metrics(stdout, &metrics);
+    if (!config.silent) {
+        print_metrics_headers(stdout);
+        print_metrics(stdout, &metrics);
+    }
     return 0;
 }
 

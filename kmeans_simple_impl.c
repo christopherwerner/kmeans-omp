@@ -36,10 +36,8 @@ int assign_clusters(struct point* dataset, int num_points, struct point *centroi
         if (dataset[n].cluster != closest_cluster) {
             dataset[n].cluster = closest_cluster;
             cluster_changes++;
-#ifdef DEBUG
-            printf("Assigning (%.0f, %.0f) to cluster %d with centroid (%.2f, %.2f) d = %.2f\n",
-                   dataset[n].x, dataset[n].y, closest_cluster,
-                   centroids[closest_cluster].x, centroids[closest_cluster].y, min_distance);
+#ifdef TRACE
+            debug_assignment(&dataset[n], closest_cluster, &centroids[closest_cluster], min_distance);
 #endif
         }
     }

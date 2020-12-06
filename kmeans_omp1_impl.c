@@ -21,7 +21,13 @@ int assign_clusters(struct point* dataset, int num_points, struct point *centroi
     printf("\nStarting assignment phase:\n");
 #endif
     int cluster_changes = 0;
+#pragma omp parallel for schedule(runtime)
     for (int n = 0; n < num_points; ++n) {
+#ifdef DEBUG_OMP
+        char msg[50];
+        sprintf(msg, "Point %d", n);
+        omp_debug(msg);
+#endif
         double min_distance = DBL_MAX; // init the min distance to a big number
         int closest_cluster = -1;
         for (int k = 0; k < num_clusters; ++k) {
@@ -36,10 +42,8 @@ int assign_clusters(struct point* dataset, int num_points, struct point *centroi
         if (dataset[n].cluster != closest_cluster) {
             dataset[n].cluster = closest_cluster;
             cluster_changes++;
-#ifdef DEBUG
-            printf("Assigning (%.0f, %.0f) to cluster %d with centroid (%.2f, %.2f) d = %.2f\n",
-                   dataset[n].x, dataset[n].y, closest_cluster,
-                   centroids[closest_cluster].x, centroids[closest_cluster].y, min_distance);
+#ifdef TRACE
+            debug_assignment(&dataset[n], closest_cluster, &centroids[closest_cluster], min_distance);
 #endif
         }
     }
@@ -63,6 +67,7 @@ void calculate_centroids(struct point* dataset, int num_points, struct point *ce
     double sum_of_x_per_cluster[num_clusters];
     double sum_of_y_per_cluster[num_clusters];
     int num_points_in_cluster[num_clusters];
+#pragma omp parallel for schedule(runtime)
     for (int k = 0; k < num_clusters; ++k) {
         sum_of_x_per_cluster[k] = 0.0;
         sum_of_y_per_cluster[k] = 0.0;
@@ -71,6 +76,10 @@ void calculate_centroids(struct point* dataset, int num_points, struct point *ce
 
     // loop over all points in the database and sum up
     // the x coords of clusters to which each belongs
+    // FAIL: Note pramgma omp for schedule(runtime) here with anything but static scheduling will result in
+    //       every point being assigned to the same cluster
+    //       this is because of a data race on num_points_in_cluster[k]
+//#pragma omp parallel for schedule(static,1) //schedule(runtime)
     for (int n = 0; n < num_points; ++n) {
         // use pointer to struct to avoid creating unnecessary copy in memory
         struct point *p = &dataset[n];
@@ -82,6 +91,7 @@ void calculate_centroids(struct point* dataset, int num_points, struct point *ce
     }
 
     // the new centroids are at the mean x and y coords of the clusters
+#pragma omp parallel for schedule(runtime)
     for (int k = 0; k < num_clusters; ++k) {
         struct point new_centroid;
         // mean x, mean y => new centroid
